@@ -21,9 +21,6 @@ SetCompressor lzma
 ; EnvVarUpdate.nsh is needed to update the PATH environment variable
 !include "EnvVarUpdate.nsh"
 
-; WinMessages.nsh is needed to send WM_CLOSE to the GUI if it is still running
-!include "WinMessages.nsh"
-
 ; nsProcess.nsh to detect whether OpenVPN process is running ( http://nsis.sourceforge.net/NsProcess_plugin )
 !addplugindir .
 !include "nsProcess.nsh"
@@ -71,9 +68,6 @@ InstallDirRegKey HKLM "SOFTWARE\${PACKAGE_NAME}" ""
 
 !define MUI_COMPONENTSPAGE_SMALLDESC
 !define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\doc\INSTALL-win32.txt"
-!define MUI_FINISHPAGE_RUN_TEXT "Start OpenVPN GUI"
-!define MUI_FINISHPAGE_RUN "$INSTDIR\bin\openvpn-gui.exe"
-!define MUI_FINISHPAGE_RUN_NOTCHECKED
 
 !define MUI_FINISHPAGE_NOAUTOCLOSE
 !define MUI_ABORTWARNING
@@ -88,14 +82,11 @@ InstallDirRegKey HKLM "SOFTWARE\${PACKAGE_NAME}" ""
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_PAGE_CUSTOMFUNCTION_SHOW StartGUI.show
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_UNPAGE_FINISH
-
-Var /Global strGuiKilled ; Track if GUI was killed so we can tick the checkbox to start it upon installer finish
 
 ;--------------------------------
 ;Languages
@@ -108,7 +99,7 @@ Var /Global strGuiKilled ; Track if GUI was killed so we can tick the checkbox t
 LangString DESC_SecOpenVPNUserSpace ${LANG_ENGLISH} "Install ${PACKAGE_NAME} user-space components, including openvpn.exe."
 
 !ifdef USE_OPENVPN_GUI
-	LangString DESC_SecOpenVPNGUI ${LANG_ENGLISH} "Install ${PACKAGE_NAME} GUI by Mathias Sundman"
+	LangString DESC_SecOpenVPNGUI ${LANG_ENGLISH} "Install ${PACKAGE_NAME} GUI by Heiko Hund"
 !endif
 
 !ifdef USE_TAP_WINDOWS
@@ -126,6 +117,8 @@ LangString DESC_SecLZODLLs ${LANG_ENGLISH} "Install LZO DLLs locally (may be omi
 LangString DESC_SecPKCS11DLLs ${LANG_ENGLISH} "Install PKCS#11 helper DLLs locally (may be omitted if DLLs are already installed globally)."
 
 LangString DESC_SecService ${LANG_ENGLISH} "Install the ${PACKAGE_NAME} service wrapper (openvpnserv.exe)"
+
+LangString DESC_SecOverwriteServiceConfig ${LANG_ENGLISH} "Overwrite previous openvpnserv.exe configuration"
 
 LangString DESC_SecOpenSSLUtilities ${LANG_ENGLISH} "Install the OpenSSL Utilities (used for generating public/private key pairs)."
 
@@ -181,50 +174,25 @@ ReserveFile "install-whirl.bmp"
 ;Pre-install section
 
 Section -pre
-	Push $0 ; for FindWindow
-	FindWindow $0 "OpenVPN-GUI"
-	StrCmp $0 0 guiNotRunning
-
-	MessageBox MB_YESNO|MB_ICONEXCLAMATION "To perform the specified operation, OpenVPN-GUI needs to be closed. Shall I close it?" /SD IDYES IDNO guiEndNo
-	DetailPrint "Closing OpenVPN-GUI..."
-	Goto guiEndYes
-
-	guiEndNo:
+	; check for running openvpn.exe processes
+	${nsProcess::FindProcess} "openvpn.exe" $R0
+	${If} $R0 == 0
+		MessageBox MB_OK|MB_ICONEXCLAMATION "The installation cannot continue as OpenVPN is currently running. Please close all OpenVPN instances and re-run the installer."
 		Quit
+	${EndIf}
 
-	guiEndYes:
-		; user wants to close GUI as part of install/upgrade
-		FindWindow $0 "OpenVPN-GUI"
-		IntCmp $0 0 guiClosed
-		SendMessage $0 ${WM_CLOSE} 0 0
-		Sleep 100
-		Goto guiEndYes
+	; openvpn.exe not running, carry on with install/upgrade
 
-	guiClosed:
-		; Keep track that we closed the GUI so we can offer to auto (re)start it later
-		StrCpy $strGuiKilled "1"
+	; Delete previous start menu folder
+	RMDir /r "$SMPROGRAMS\${PACKAGE_NAME}"
 
-	guiNotRunning:
-		; check for running openvpn.exe processes
-		${nsProcess::FindProcess} "openvpn.exe" $R0
-		${If} $R0 == 0
-			MessageBox MB_OK|MB_ICONEXCLAMATION "The installation cannot continue as OpenVPN is currently running. Please close all OpenVPN instances and re-run the installer."
-			Quit
-		${EndIf}
+	; Stop & Remove previous OpenVPN service
+	DetailPrint "Removing any previous OpenVPN service..."
+	nsExec::ExecToLog '"$INSTDIR\bin\openvpnserv.exe" -remove'
+	Pop $R0 # return value/error/timeout
 
-		; openvpn.exe + GUI not running/closed successfully, carry on with install/upgrade
-	
-		; Delete previous start menu folder
-		RMDir /r "$SMPROGRAMS\${PACKAGE_NAME}"
-
-		; Stop & Remove previous OpenVPN service
-		DetailPrint "Removing any previous OpenVPN service..."
-		nsExec::ExecToLog '"$INSTDIR\bin\openvpnserv.exe" -remove'
-		Pop $R0 # return value/error/timeout
-
-		Sleep 3000
+	Sleep 3000
 	Pop $0 ; for FindWindow
-
 SectionEnd
 
 Section /o "-workaround" SecAddShortcutsWorkaround
@@ -249,59 +217,84 @@ Section /o "${PACKAGE_NAME} User-Space Components" SecOpenVPNUserSpace
 		CreateShortCut "$SMPROGRAMS\${PACKAGE_NAME}\Documentation\${PACKAGE_NAME} Windows Notes.lnk" "$INSTDIR\doc\INSTALL-win32.txt"
 	${EndIf}
 
+	; Store install folder in registry. Other registry values are set in
+	; post-install stage, but this one needs to be set early so that
+	; openvpn-gui installer does not bail out.
+	WriteRegStr HKLM "SOFTWARE\${PACKAGE_NAME}" "" "$INSTDIR"
 SectionEnd
 
-Section /o "${PACKAGE_NAME} Service" SecService
+SectionGroup "!OpenVPN Service"
 
-	SetOverwrite on
+	Section /o "Overwrite openvpnserv.exe configuration" SecOverwriteServiceConfig
+		; This section does nothing by itself, but it determines whether or not
+		; openvpnserv's registry keys are overwritten during install. This
+		; prevents openvpnserv.exe from breaking if OpenVPN's install directory
+		; is changed.
+	SectionEnd
 
-	SetOutPath "$INSTDIR\bin"
-	File "${OPENVPN_ROOT}\bin\openvpnserv.exe"
+	Section /o "${PACKAGE_NAME} Service" SecService
 
-	SetOutPath "$INSTDIR\config"
+		SetOverwrite on
 
-	FileOpen $R0 "$INSTDIR\config\README.txt" w
-	FileWrite $R0 "This directory should contain ${PACKAGE_NAME} configuration files$\r$\n"
-	FileWrite $R0 "each having an extension of .${OPENVPN_CONFIG_EXT}$\r$\n"
-	FileWrite $R0 "$\r$\n"
-	FileWrite $R0 "When ${PACKAGE_NAME} is started as a service, a separate ${PACKAGE_NAME}$\r$\n"
-	FileWrite $R0 "process will be instantiated for each configuration file.$\r$\n"
-	FileClose $R0
+		SetOutPath "$INSTDIR\bin"
+		File "${OPENVPN_ROOT}\bin\openvpnserv.exe"
 
-	SetOutPath "$INSTDIR\sample-config"
-	File "${OPENVPN_ROOT}\share\doc\openvpn\sample\sample.${OPENVPN_CONFIG_EXT}"
-	File "${OPENVPN_ROOT}\share\doc\openvpn\sample\client.${OPENVPN_CONFIG_EXT}"
-	File "${OPENVPN_ROOT}\share\doc\openvpn\sample\server.${OPENVPN_CONFIG_EXT}"
+		SetOutPath "$INSTDIR\config"
 
-	CreateDirectory "$INSTDIR\log"
-	FileOpen $R0 "$INSTDIR\log\README.txt" w
-	FileWrite $R0 "This directory will contain the log files for ${PACKAGE_NAME}$\r$\n"
-	FileWrite $R0 "sessions which are being run as a service.$\r$\n"
-	FileClose $R0
+		FileOpen $R0 "$INSTDIR\config\README.txt" w
+		FileWrite $R0 "This directory should contain ${PACKAGE_NAME} configuration files$\r$\n"
+		FileWrite $R0 "each having an extension of .${OPENVPN_CONFIG_EXT}$\r$\n"
+		FileWrite $R0 "$\r$\n"
+		FileWrite $R0 "When ${PACKAGE_NAME} is started as a service, a separate ${PACKAGE_NAME}$\r$\n"
+		FileWrite $R0 "process will be instantiated for each configuration file.$\r$\n"
+		FileClose $R0
 
-	${If} ${SectionIsSelected} ${SecAddShortcutsWorkaround}
-		CreateDirectory "$SMPROGRAMS\${PACKAGE_NAME}\Utilities"
-		CreateShortCut "$SMPROGRAMS\${PACKAGE_NAME}\Utilities\Generate a static ${PACKAGE_NAME} key.lnk" "$INSTDIR\bin\openvpn.exe" '--pause-exit --verb 3 --genkey --secret "$INSTDIR\config\key.txt"' "$INSTDIR\icon.ico" 0
-		CreateDirectory "$SMPROGRAMS\${PACKAGE_NAME}\Shortcuts"
-		CreateShortCut "$SMPROGRAMS\${PACKAGE_NAME}\Shortcuts\${PACKAGE_NAME} Sample Configuration Files.lnk" "$INSTDIR\sample-config" ""
-		CreateShortCut "$SMPROGRAMS\${PACKAGE_NAME}\Shortcuts\${PACKAGE_NAME} log file directory.lnk" "$INSTDIR\log" ""
-		CreateShortCut "$SMPROGRAMS\${PACKAGE_NAME}\Shortcuts\${PACKAGE_NAME} configuration file directory.lnk" "$INSTDIR\config" ""
-	${EndIf}
+		SetOutPath "$INSTDIR\sample-config"
+		File "${OPENVPN_ROOT}\share\doc\openvpn\sample\sample.${OPENVPN_CONFIG_EXT}"
+		File "${OPENVPN_ROOT}\share\doc\openvpn\sample\client.${OPENVPN_CONFIG_EXT}"
+		File "${OPENVPN_ROOT}\share\doc\openvpn\sample\server.${OPENVPN_CONFIG_EXT}"
 
-	; set registry parameters for openvpnserv	
-	!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "config_dir" "$INSTDIR\config" 
-	!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "config_ext"  "${OPENVPN_CONFIG_EXT}"
-	!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "exe_path"    "$INSTDIR\bin\openvpn.exe"
-	!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "log_dir"     "$INSTDIR\log"
-	!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "priority"    "NORMAL_PRIORITY_CLASS"
-	!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "log_append"  "0"
+		CreateDirectory "$INSTDIR\log"
+		FileOpen $R0 "$INSTDIR\log\README.txt" w
+		FileWrite $R0 "This directory will contain the log files for ${PACKAGE_NAME}$\r$\n"
+		FileWrite $R0 "sessions which are being run as a service.$\r$\n"
+		FileClose $R0
 
-	; install openvpnserv as a service (to be started manually from service control manager)
-	DetailPrint "Installing OpenVPN Service..."
-	nsExec::ExecToLog '"$INSTDIR\bin\openvpnserv.exe" -install'
-	Pop $R0 # return value/error/timeout
+		${If} ${SectionIsSelected} ${SecAddShortcutsWorkaround}
+			CreateDirectory "$SMPROGRAMS\${PACKAGE_NAME}\Utilities"
+			CreateShortCut "$SMPROGRAMS\${PACKAGE_NAME}\Utilities\Generate a static ${PACKAGE_NAME} key.lnk" "$INSTDIR\bin\openvpn.exe" '--pause-exit --verb 3 --genkey --secret "$INSTDIR\config\key.txt"' "$INSTDIR\icon.ico" 0
+			CreateDirectory "$SMPROGRAMS\${PACKAGE_NAME}\Shortcuts"
+			CreateShortCut "$SMPROGRAMS\${PACKAGE_NAME}\Shortcuts\${PACKAGE_NAME} Sample Configuration Files.lnk" "$INSTDIR\sample-config" ""
+			CreateShortCut "$SMPROGRAMS\${PACKAGE_NAME}\Shortcuts\${PACKAGE_NAME} log file directory.lnk" "$INSTDIR\log" ""
+			CreateShortCut "$SMPROGRAMS\${PACKAGE_NAME}\Shortcuts\${PACKAGE_NAME} configuration file directory.lnk" "$INSTDIR\config" ""
+		${EndIf}
 
-SectionEnd
+		; set registry parameters for openvpnserv
+		${If} ${SectionIsSelected} ${SecOverwriteServiceConfig}
+			WriteRegStr HKLM "SOFTWARE\${PACKAGE_NAME}" "config_dir" "$INSTDIR\config"
+			WriteRegStr HKLM "SOFTWARE\${PACKAGE_NAME}" "config_ext"  "${OPENVPN_CONFIG_EXT}"
+			WriteRegStr HKLM "SOFTWARE\${PACKAGE_NAME}" "exe_path"    "$INSTDIR\bin\openvpn.exe"
+			WriteRegStr HKLM "SOFTWARE\${PACKAGE_NAME}" "log_dir"     "$INSTDIR\log"
+			WriteRegStr HKLM "SOFTWARE\${PACKAGE_NAME}" "priority"    "NORMAL_PRIORITY_CLASS"
+			WriteRegStr HKLM "SOFTWARE\${PACKAGE_NAME}" "log_append"  "0"
+		${Else}
+			!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "config_dir" "$INSTDIR\config"
+			!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "config_ext"  "${OPENVPN_CONFIG_EXT}"
+			!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "exe_path"    "$INSTDIR\bin\openvpn.exe"
+			!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "log_dir"     "$INSTDIR\log"
+			!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "priority"    "NORMAL_PRIORITY_CLASS"
+			!insertmacro WriteRegStringIfUndef HKLM "SOFTWARE\${PACKAGE_NAME}" "log_append"  "0"
+		${EndIf}
+
+		; install openvpnserv as a service (to be started manually from service control manager)
+		DetailPrint "Installing OpenVPN Service..."
+		nsExec::ExecToLog '"$INSTDIR\bin\openvpnserv.exe" -install'
+		Pop $R0 # return value/error/timeout
+	SectionEnd
+
+SectionGroupEnd
+
+
 
 !ifdef USE_TAP_WINDOWS
 Section /o "TAP Virtual Ethernet Adapter" SecTAP
@@ -325,15 +318,17 @@ SectionEnd
 Section /o "${PACKAGE_NAME} GUI" SecOpenVPNGUI
 
 	SetOverwrite on
-	SetOutPath "$INSTDIR\bin"
+	SetOutPath "$TEMP"
 
-	File "${OPENVPN_ROOT}\bin\openvpn-gui.exe"
+	File "${OPENVPN_ROOT}\openvpn-gui-installer.exe"
 
-	${If} ${SectionIsSelected} ${SecAddShortcutsWorkaround}
-		CreateDirectory "$SMPROGRAMS\${PACKAGE_NAME}"
-		CreateShortCut "$SMPROGRAMS\${PACKAGE_NAME}\${PACKAGE_NAME} GUI.lnk" "$INSTDIR\bin\openvpn-gui.exe" ""
-		CreateShortcut "$DESKTOP\${PACKAGE_NAME} GUI.lnk" "$INSTDIR\bin\openvpn-gui.exe"
-	${EndIf}
+	DetailPrint "Installing OpenVPN-GUI..."
+	nsExec::ExecToLog '"$TEMP\openvpn-gui-installer.exe" /S'
+	Pop $R0 # return value/error/timeout
+
+	Delete "$TEMP\openvpn-gui-installer.exe"
+
+	WriteRegStr HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\${PACKAGE_NAME}" "gui" "installed"
 SectionEnd
 !endif
 
@@ -436,9 +431,11 @@ Function .onInit
 	${GetParameters} $R0
 	ClearErrors
 
+	; Default values for the components
 	!insertmacro SelectByParameter ${SecAddShortcutsWorkaround} SELECT_SHORTCUTS 1
 	!insertmacro SelectByParameter ${SecOpenVPNUserSpace} SELECT_OPENVPN 1
 	!insertmacro SelectByParameter ${SecService} SELECT_SERVICE 1
+	!insertmacro SelectByParameter ${SecOverwriteServiceConfig} SELECT_OVERWRITE_SERVICE_CONFIG 0
 !ifdef USE_TAP_WINDOWS
 	!insertmacro SelectByParameter ${SecTAP} SELECT_TAP 1
 !endif
@@ -486,6 +483,9 @@ Function .onSelChange
 	${If} ${SectionIsSelected} ${SecService}
 		!insertmacro SelectSection ${SecOpenVPNUserSpace}
 	${EndIf}
+	${If} ${SectionIsSelected} ${SecOverwriteServiceConfig}
+		!insertmacro SelectSection ${SecService}
+	${EndIf}
 !ifdef USE_EASYRSA
 	${If} ${SectionIsSelected} ${SecOpenVPNEasyRSA}
 		!insertmacro SelectSection ${SecOpenSSLUtilities}
@@ -495,19 +495,6 @@ Function .onSelChange
 		!insertmacro SelectSection ${SecAddShortcutsWorkaround}
 	${Else}
 		!insertmacro UnselectSection ${SecAddShortcutsWorkaround}
-	${EndIf}
-FunctionEnd
-
-Function StartGUI.show
-	; if the user chooses not to install the GUI, do not offer to start it
-	${IfNot} ${SectionIsSelected} ${SecOpenVPNGUI}
-		SendMessage $mui.FinishPage.Run ${BM_SETCHECK} ${BST_CHECKED} 0
-		ShowWindow $mui.FinishPage.Run 0
-	${EndIf}
-
-	; if we killed the GUI to do the install/upgrade, automatically tick the "Start OpenVPN GUI" option
-	${If} $strGuiKilled == "1"
-		SendMessage $mui.FinishPage.Run ${BM_SETCHECK} ${BST_CHECKED} 1
 	${EndIf}
 FunctionEnd
 
@@ -521,9 +508,6 @@ Section -post
 	File "icon.ico"
 	SetOutPath "$INSTDIR\doc"
 	File "${OPENVPN_ROOT}\share\doc\openvpn\license.txt"
-
-	; Store install folder in registry
-	WriteRegStr HKLM "SOFTWARE\${PACKAGE_NAME}" "" "$INSTDIR"
 
 	; Create uninstaller
 	WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -542,6 +526,7 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
 	!insertmacro MUI_DESCRIPTION_TEXT ${SecOpenVPNUserSpace} $(DESC_SecOpenVPNUserSpace)
 	!insertmacro MUI_DESCRIPTION_TEXT ${SecService} $(DESC_SecService)
+	!insertmacro MUI_DESCRIPTION_TEXT ${SecOverwriteServiceConfig} $(DESC_SecOverwriteServiceConfig)
 	!ifdef USE_OPENVPN_GUI
 		!insertmacro MUI_DESCRIPTION_TEXT ${SecOpenVPNGUI} $(DESC_SecOpenVPNGUI)
 	!endif
@@ -574,25 +559,6 @@ FunctionEnd
 
 Section "Uninstall"
 
-	; Stop OpenVPN-GUI if currently running
-	DetailPrint "Stopping OpenVPN-GUI..."
-	StopGUI:
-
-	FindWindow $0 "OpenVPN-GUI"
-	IntCmp $0 0 guiClosed
-	SendMessage $0 ${WM_CLOSE} 0 0
-	Sleep 100
-	Goto StopGUI
-
-	guiClosed:
-
-	; Stop OpenVPN if currently running
-	DetailPrint "Removing OpenVPN Service..."
-	nsExec::ExecToLog '"$INSTDIR\bin\openvpnserv.exe" -remove'
-	Pop $R0 # return value/error/timeout
-
-	Sleep 3000
-
 	!ifdef USE_TAP_WINDOWS
 		ReadRegStr $R0 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\${PACKAGE_NAME}" "tap"
 		${If} $R0 == "installed"
@@ -608,8 +574,20 @@ Section "Uninstall"
 	${un.EnvVarUpdate} $R0 "PATH" "R" "HKLM" "$INSTDIR\bin"
 
 	!ifdef USE_OPENVPN_GUI
+		ReadRegStr $R0 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\${PACKAGE_NAME}" "gui"
+
+		; Only uninstall OpenVPN-GUI if it was (originally) installed by the OpenVPN installer
+		${If} $R0 == "installed"
+			ReadRegStr $R0 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OpenVPN-GUI" "UninstallString"
+			${If} $R0 != ""
+				DetailPrint "Uninstalling OpenVPN-GUI..."
+				nsExec::ExecToLog '"$R0" /S'
+				Pop $R0 # return value/error/timeout
+			${EndIf}
+		${EndIf}
+
+		; Delete legacy openvpn-gui.exe in the openvpn installation directory if it exists
 		Delete "$INSTDIR\bin\openvpn-gui.exe"
-		Delete "$DESKTOP\${PACKAGE_NAME} GUI.lnk"
 	!endif
 
 	Delete "$INSTDIR\bin\openvpn.exe"

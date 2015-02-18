@@ -304,6 +304,8 @@ build_openvpn_gui() {
 	./configure ${CONFIGOPTS} ${EXTRA_OPENVPN_GUI_CONFIG} \
 		|| die "Configure openvpn-gui"
 	${MAKE} ${MAKEOPTS} ${MAKE_AUTOCONF_INSTALL_TARGET} DESTDIR="${OPENVPN_ROOT}" || die "make openvpn-gui"
+	${MAKE} installer || die "make openvpn-gui-installer"
+	cp openvpn-gui-installer.exe "${OPENVPN_ROOT}" || die "cp openvpn-gui-installer.exe"
 
 	fixup_la
 
