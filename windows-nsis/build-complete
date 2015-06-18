@@ -21,6 +21,10 @@ main() {
 			CHOST=${arch}-w64-mingw32 \
 			../generic/build \
 				--special-build="${SPECIAL_BUILD}" \
+				${DO_SIGN:+--sign} \
+				--sign-pkcs12="${SIGN_PKCS12}" \
+				--sign-pkcs12-pass="${SIGN_PKCS12_PASS}" \
+				--sign-timestamp="${SIGN_TIMESTAMP_URL}" \
 				${WIN_USE_DEPCACHE:+--use-depcache=win-$arch} \
 				${WIN_SAVE_DEPCACHE:+--save-depcache=win-$arch} \
 				|| die "build ${arch}"

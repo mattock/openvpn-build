@@ -27,6 +27,11 @@
 # CHOST=i586-pc-linux-uclibc CBUILD=i686-pc-linux-gnu ./build
 #
 
+OSSLSIGNCODE="${OSSLSIGNCODE:-osslsigncode}"
+
+# Include shared functions
+. ../generic/functions
+
 die() {
 	local m="$1"
 
@@ -300,10 +305,12 @@ build_openvpn_gui() {
 	fixup_la
 
 	echo "Build openvpn-gui"
+	cp "${SIGN_PKCS12}" "${BUILDROOT}/openvpn-gui"* || die "cp pkcs12"
 	cd "${BUILDROOT}/openvpn-gui"* || die "cd openvpn gui"
 	./configure ${CONFIGOPTS} ${EXTRA_OPENVPN_GUI_CONFIG} \
 		|| die "Configure openvpn-gui"
 	${MAKE} ${MAKEOPTS} ${MAKE_AUTOCONF_INSTALL_TARGET} DESTDIR="${OPENVPN_ROOT}" || die "make openvpn-gui"
+	codesign openvpn-gui.exe || die "sign openvpn-gui.exe"
 	${MAKE} installer || die "make openvpn-gui-installer"
 	cp openvpn-gui-installer.exe "${OPENVPN_ROOT}" || die "cp openvpn-gui-installer.exe"
 
@@ -505,6 +512,18 @@ while [ -n "$1" ]; do
 			;;
 		--special-build=*)
 			SPECIAL_BUILD="${v}"
+			;;
+		--sign)
+			DO_SIGN=1
+			;;
+		--sign-pkcs12=*)
+			SIGN_PKCS12="${v}"
+			;;
+		--sign-pkcs12-pass=*)
+			SIGN_PKCS12_PASS="${v}"
+			;;
+		--sign-timestamp=*)
+			SIGN_TIMESTAMP_URL="${v}"
 			;;
 		--use-depcache=*)
 			DEPCACHE_SUFFIX="${v}"

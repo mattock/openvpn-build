@@ -6,6 +6,9 @@ ROOT="${ROOT:-tmp}"
 OPENVPN_ROOT="${ROOT}/openvpn"
 EASYRSA_ROOT="${ROOT}/easy-rsa"
 
+# Include shared functions
+. ../generic/functions
+
 die() {
 	local m="$1"
 	echo "FATAL: ${m}" >&2
@@ -15,22 +18,6 @@ die() {
 dospath() {
 	local p="$1"
 	echo "$p" | sed 's/\//\\/g'
-}
-
-codesign() {
-	local f="$1"
-	if [ -n "${DO_SIGN}" ]; then
-		echo "Signing '${f}'"
-		"${OSSLSIGNCODE}" \
-			-pkcs12 "${SIGN_PKCS12}" \
-			-pass "${SIGN_PKCS12_PASS}" \
-			-t "${SIGN_TIMESTAMP_URL}" \
-			-in "${f}" \
-			-out "${f}.tmp" \
-			|| die "Cannot sign '${f}'"
-		rm "${f}"
-		mv "${f}.tmp" "${f}" || die "Cannot move into '${f}'"
-	fi
 }
 
 layout() {
